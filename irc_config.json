@@ -1,0 +1,11 @@
+{
+  "server": "tardis.swiftirc.net",
+  "port": 6697,
+  "ssl": true,
+  "nick": "LoggerBot_",
+  "realname": "IRC Logger",
+  "channels": "#dupefr-pre",
+  "keywords": "",
+  "regex": "",
+  "whitelist": ""
+}

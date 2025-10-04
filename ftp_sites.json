@@ -1,0 +1,19 @@
+{
+  "default_site": "example",
+  "sites": {
+    "example": {
+      "protocol": "ftps",
+      "host": "ftp.example.com",
+      "port": 21,
+      "user": "username",
+      "pass": "password",
+      "local_base_dir": "C:\\Downloads",
+      "name_transform": "raw",
+      "base_paths": {
+        "default": "/incoming",
+        "GAMES": "/incoming/games",
+        "MOVIES": "/incoming/movies"
+      }
+    }
+  }
+}
