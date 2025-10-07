@@ -157,6 +157,16 @@ class RequestHandler(BaseHTTPRequestHandler):
     .table-wrapper { overflow-x: auto; border-radius: 12px; }
     table { min-width: 720px; width: 100%; }
     td:nth-child(6), .col-message { word-break: break-word; }
+    /* Style pour la colonne message cliquable */
+    .message-cell { 
+      cursor: pointer; 
+      color: var(--accent); 
+      transition: color 0.2s ease;
+    }
+    .message-cell:hover { 
+      color: var(--accent-hover); 
+      text-decoration: underline;
+    }
     @media (max-width: 900px) {
       h1 { font-size: 18px; }
       th, td { padding: 6px 8px; font-size: 12px; }
@@ -352,8 +362,19 @@ class RequestHandler(BaseHTTPRequestHandler):
           <td>${escapeHtml(r.channel || '')}</td>
           <td>${escapeHtml(r.nick || '')}</td>
           <td>${escapeHtml(r.type || '')}</td>
-          <td>${escapeHtml(r.message || '')}</td>
+          <td class="message-cell">${escapeHtml(r.message || '')}</td>
         `;
+        
+        // Ajouter le gestionnaire de clic sur la cellule message
+        const messageCell = tr.querySelector('.message-cell');
+        if (messageCell && r.message) {
+          messageCell.addEventListener('click', () => {
+            const searchQuery = encodeURIComponent(r.message);
+            const googleUrl = `https://www.google.com/search?q=${searchQuery}`;
+            window.open(googleUrl, '_blank');
+          });
+        }
+        
         tbody.appendChild(tr);
       }
     }
