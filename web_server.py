@@ -3,8 +3,12 @@ import io
 import csv
 import os
 import threading
+import re
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs, quote
+import urllib.request
+import urllib.error
 
 # Importer la DB depuis l’interface existante
 from irc_db_gui import ReleasesDB, DB_PATH
@@ -62,6 +66,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._api_irc_disconnect()
         if parsed.path == "/api/irc/logs":
             return self._api_irc_logs(parsed)
+        if parsed.path == "/api/irc/nfo":
+            return self._api_irc_nfo(parsed)
 
         _html_response(self, "<h1>404 Not Found</h1>", status=404)
 
@@ -157,16 +163,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     .table-wrapper { overflow-x: auto; border-radius: 12px; }
     table { min-width: 720px; width: 100%; }
     td:nth-child(6), .col-message { word-break: break-word; }
-    /* Style pour la colonne message cliquable */
-    .message-cell { 
-      cursor: pointer; 
-      color: var(--accent); 
-      transition: color 0.2s ease;
-    }
-    .message-cell:hover { 
-      color: var(--accent-hover); 
-      text-decoration: underline;
-    }
+    /* Rendre la colonne message cliquable */
+    td:nth-child(6) { cursor: pointer; color: var(--accent); }
+    td:nth-child(6):hover { text-decoration: underline; color: var(--accent-hover); }
     @media (max-width: 900px) {
       h1 { font-size: 18px; }
       th, td { padding: 6px 8px; font-size: 12px; }
@@ -217,6 +216,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         <th data-col=\"nick\">Nick</th>
         <th data-col=\"type\">Type</th>
         <th data-col=\"message\">Message</th>
+        <th data-col=\"actions\">Actions</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -362,19 +362,51 @@ class RequestHandler(BaseHTTPRequestHandler):
           <td>${escapeHtml(r.channel || '')}</td>
           <td>${escapeHtml(r.nick || '')}</td>
           <td>${escapeHtml(r.type || '')}</td>
-          <td class="message-cell">${escapeHtml(r.message || '')}</td>
+          <td class="col-message">${escapeHtml(r.message || '')}</td>
+          <td class="col-actions"><button class="btn nfo-btn" title="Envoyer !nfo release">NFO</button></td>
         `;
-        
-        // Ajouter le gestionnaire de clic sur la cellule message
-        const messageCell = tr.querySelector('.message-cell');
-        if (messageCell && r.message) {
-          messageCell.addEventListener('click', () => {
-            const searchQuery = encodeURIComponent(r.message);
-            const googleUrl = `https://www.google.com/search?q=${searchQuery}`;
-            window.open(googleUrl, '_blank');
+        // Clic sur message: recherche Google
+        const tdMsg = tr.querySelector('td:nth-child(6)');
+        if (tdMsg) {
+          tdMsg.addEventListener('click', () => {
+            const q = (r.message || '').trim();
+            if (q) {
+              const url = 'https://www.google.com/search?q=' + encodeURIComponent(q);
+              window.open(url, '_blank', 'noopener');
+            }
           });
         }
-        
+        // Bouton NFO: envoie la commande !nfo <release> sur le channel
+        const btnNfo = tr.querySelector('.nfo-btn');
+        if (btnNfo) {
+          btnNfo.addEventListener('click', async () => {
+            const release = (r.message || '').trim();
+            const channel = (r.channel || '').trim();
+            if (!release || !channel) {
+              showToast('Release ou channel manquant', 'error');
+              return;
+            }
+            const url = '/api/irc/nfo?channel=' + encodeURIComponent(channel) + '&release=' + encodeURIComponent(release);
+            try {
+              const res = await fetch(url);
+              const data = await res.json();
+              if (res.ok && data.ok && data.sent) {
+                if (data.url) {
+                  showToast('URL détectée: ' + String(data.url), 'info');
+                  window.open(String(data.url), '_blank', 'noopener');
+                  showToast('Lien NFO ouvert', 'success');
+                } else {
+                  showToast('Commande NFO envoyée, lien non détecté', 'success');
+                }
+              } else {
+                showToast('Envoi NFO échoué: ' + (data.error || 'inconnu'), 'error');
+              }
+            } catch (e) {
+              console.error('NFO erreur:', e);
+              showToast('Erreur réseau NFO', 'error');
+            }
+          });
+        }
         tbody.appendChild(tr);
       }
     }
@@ -732,6 +764,128 @@ class RequestHandler(BaseHTTPRequestHandler):
                 lines = f.readlines()
             text = "".join(lines[-tail:])
             return _json_response(self, {"ok": True, "text": text})
+        except Exception as e:
+            return _json_response(self, {"ok": False, "error": str(e)}, status=500)
+
+    def _api_irc_nfo(self, parsed):
+        # Envoi de la commande !nfo <release> sur le channel fourni
+        ctx = self.context
+        if not ctx or not hasattr(ctx, "irc") or ctx.irc is None:
+            return _json_response(self, {"ok": False, "error": "IRC indisponible"}, status=400)
+        q = parse_qs(parsed.query)
+        channel = (q.get("channel", [""])[0] or "").strip()
+        release = (q.get("release", [""])[0] or "").strip()
+        if not channel or not release:
+            return _json_response(self, {"ok": False, "error": "Paramètres manquants"}, status=400)
+        cmd = "!nfo " + release
+        try:
+            # Envoi de la commande
+            sent = False
+            send_fn = getattr(ctx.irc, "send_privmsg", None)
+            if callable(send_fn):
+                sent = bool(send_fn(channel, cmd))
+            else:
+                client = getattr(ctx.irc, "client", None)
+                connected = getattr(ctx.irc, "connected", False)
+                if client is not None and connected:
+                    client.privmsg(channel, cmd)
+                    sent = True
+            if not sent:
+                return _json_response(self, {"ok": False, "error": "Client IRC non disponible ou déconnecté"}, status=500)
+            # Attendre un lien https dans les logs
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            log_path = os.path.join(base_dir, "irc_log.txt")
+            url_found = None
+            url_regex = re.compile(r'https?://\S+', re.IGNORECASE)
+            # Préparer le nick du bot pour filtrer les réponses en privmsg
+            my_nick = None
+            try:
+                nv = getattr(ctx.irc, "nick_var", None)
+                if nv:
+                    my_nick = nv.get().strip()
+            except Exception:
+                my_nick = None
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                    # Pass 1: lignes mentionnant Target: <nick> (privmsg au bot) ou @<channel>
+                    for line in lines[-500:]:
+                        if (my_nick and f"Target: {my_nick}" in line) or (f"@{channel}" in line):
+                            line_clean = re.sub(r'[\x00-\x1F\x7F]', '', line)
+                            # D’abord tenter le lien entre backticks
+                            tick_re = re.compile(r'`(https?://[^`\s]+)`', re.IGNORECASE)
+                            m_tick = tick_re.search(line_clean)
+                            candidates = []
+                            if m_tick:
+                                candidates.append(m_tick.group(1))
+                            # Sinon, fallback sur toutes les URLs de la ligne
+                            if not candidates:
+                                candidates = [m.group(0) for m in url_regex.finditer(line_clean)]
+                            if candidates:
+                                # Normaliser et sélectionner: préférer dupefr.fr/nfo7/, sinon dernier match
+                                normalized = []
+                                for u in candidates:
+                                    u = u.rstrip('.,)>]"\'`')
+                                    # Retirer codes de couleur IRC (\x03xx) et autres caractères de contrôle après .nfo
+                                    u = re.sub(r'(?<=\.nfo)\\x[0-9a-fA-F]{2,4}.*$', '', u)
+                                    u = re.sub(r'(?<=\.nfo)\d+$', '', u)
+                                    normalized.append(u)
+                                # Sélection NFO: tout lien https://… se terminant par .nfo (priorité dupefr.fr)
+                                nfo_any_re = re.compile(r'https?://[^`\s]+?\.nfo\b', re.IGNORECASE)
+                                nfo_any = [u for u in normalized if nfo_any_re.match(u)]
+                                if nfo_any:
+                                    preferred = [u for u in nfo_any if 'dupefr.fr' in u]
+                                    candidate = preferred[-1] if preferred else nfo_any[-1]
+                                    url_found = candidate
+                                    break
+                                # À défaut, garder dupefr.fr avec chemin /nfo*
+                                preferred = [u for u in normalized if 'dupefr.fr' in u and '/nfo' in u]
+                                if preferred:
+                                    candidate = preferred[-1]
+                                    url_found = candidate
+                                    break
+                                # Sinon, ne rien sélectionner sur cette ligne et continuer
+                    # Pass 2: si rien trouvé, chercher toute URL récente
+                    if not url_found:
+                        for line in lines[-500:]:
+                            line_clean = re.sub(r'[\x00-\x1F\x7F]', '', line)
+                            tick_re = re.compile(r'`(https?://[^`\s]+)`', re.IGNORECASE)
+                            m_tick = tick_re.search(line_clean)
+                            candidates = []
+                            if m_tick:
+                                candidates.append(m_tick.group(1))
+                            if not candidates:
+                                candidates = [m.group(0) for m in url_regex.finditer(line_clean)]
+                            if candidates:
+                                normalized = []
+                                for u in candidates:
+                                    u = u.rstrip('.,)>]"\'`')
+                                    # Retirer codes de couleur IRC (\x03xx) et autres caractères de contrôle après .nfo
+                                    u = re.sub(r'(?<=\.nfo)\\x[0-9a-fA-F]{2,4}.*$', '', u)
+                                    u = re.sub(r'(?<=\.nfo)\d+$', '', u)
+                                    normalized.append(u)
+                                # Sélection NFO: tout lien https://… se terminant par .nfo (priorité dupefr.fr)
+                                nfo_any_re = re.compile(r'https?://[^`\s]+?\.nfo\b', re.IGNORECASE)
+                                nfo_any = [u for u in normalized if nfo_any_re.match(u)]
+                                if nfo_any:
+                                    preferred = [u for u in nfo_any if 'dupefr.fr' in u]
+                                    candidate = preferred[-1] if preferred else nfo_any[-1]
+                                    url_found = candidate
+                                    break
+                                preferred = [u for u in normalized if 'dupefr.fr' in u and '/nfo' in u]
+                                if preferred:
+                                    candidate = preferred[-1]
+                                    url_found = candidate
+                                    break
+                                # Sinon, continuer sans rien sélectionner
+                    if url_found:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            return _json_response(self, {"ok": True, "sent": True, "url": url_found})
         except Exception as e:
             return _json_response(self, {"ok": False, "error": str(e)}, status=500)
 

@@ -13,15 +13,19 @@ import time
 CONFIG_FILE = "irc_config.json"
 LOG_FILE = "irc_log.txt"
 RECONNECT_DELAY = 10  # secondes avant tentative de reconnexion
+DEFAULT_MAX_RECONNECT_ATTEMPTS = 5  # nb d'échecs consécutifs avant abandon
 
 # ---------------- Utils ----------------
+
 def extract_release_types(message):
-    clean = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?', '', message)  
-    clean = re.sub(r'[\x02\x1F\x16\x0F]', '', clean)          
-    clean = re.sub(r'\d+\[|\]\d+', '[', clean)
-    types = re.findall(r'\[(\w+)\]', clean)
-    text_clean = re.sub(r'\[(\w+)\]', '', clean).strip()
-    return [t.upper() for t in types], text_clean
+    try:
+        text_clean = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?','', message)
+        text_clean = re.sub(r'[\x02\x1F\x16\x0F]','', text_clean)
+        types = re.findall(r'\[(?:PRE|PRERELEASE|MOVIES|TV|MP3|GAMES|APPS|XXX|ANIME|EBOOKS|0DAY)\]', text_clean, flags=re.IGNORECASE)
+        types = [t.strip('[]').upper() for t in types]
+        return types, text_clean
+    except Exception:
+        return [], message
 
 # ---------------- GUI ----------------
 class IRCLoggerGUI:
@@ -45,6 +49,7 @@ class IRCLoggerGUI:
         self.keywords_var = tk.StringVar(value="")
         self.regex_var = tk.StringVar(value="")
         self.whitelist_var = tk.StringVar(value="")
+        self.max_reconnect_attempts_var = tk.IntVar(value=DEFAULT_MAX_RECONNECT_ATTEMPTS)
 
         self.type_tabs = {}
         self.create_widgets()
@@ -56,6 +61,7 @@ class IRCLoggerGUI:
         self.client = None
         self.reactor = irc.client.Reactor()
         self.connected = False
+        self.failed_reconnects = 0
 
         self.load_config()
         self.reconnect_flag = True
@@ -79,6 +85,9 @@ class IRCLoggerGUI:
         ttk.Entry(config_frame, textvariable=self.realname_var, width=15).grid(row=1, column=3)
         ttk.Label(config_frame, text="Channels (, séparés):").grid(row=2, column=0, sticky="w")
         ttk.Entry(config_frame, textvariable=self.channels_var, width=30).grid(row=2, column=1, columnspan=3, sticky="we")
+        # Nouveau: option max tentatives
+        ttk.Label(config_frame, text="Max tentatives reconnexion:").grid(row=3, column=0, sticky="w")
+        ttk.Entry(config_frame, textvariable=self.max_reconnect_attempts_var, width=6).grid(row=3, column=1)
         ttk.Button(config_frame, text="Se connecter", command=self.start_connection).grid(row=6, column=0, pady=5)
         ttk.Button(config_frame, text="Sauvegarder config", command=self.save_config).grid(row=6, column=1)
         ttk.Button(config_frame, text="Quitter", command=self.root.quit).grid(row=6, column=2)
@@ -140,28 +149,32 @@ class IRCLoggerGUI:
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{ts_iso}] <{nick}@{channel}> [{type_to_log}] {text_clean}\n")
 
-    # ---------------- Filters ----------------
     def apply_filters(self, nick, message):
-        whitelist = [n.strip() for n in self.whitelist_var.get().split(",") if n.strip()]
-        if whitelist and nick not in whitelist:
-            return False
-        keywords = [k.strip().lower() for k in self.keywords_var.get().split(",") if k.strip()]
-        if keywords and any(k in message.lower() for k in keywords):
+        try:
+            kw = self.keywords_var.get().strip()
+            rx = self.regex_var.get().strip()
+            wl = self.whitelist_var.get().strip()
+            if not kw and not rx and not wl:
+                return True
+            ok_kw = True
+            ok_rx = True
+            ok_wl = True
+            if kw:
+                kws = [k.strip() for k in kw.split(',') if k.strip()]
+                ok_kw = any(k.lower() in message.lower() for k in kws)
+            if rx:
+                patterns = [r.strip() for r in rx.split(',') if r.strip()]
+                ok_rx = any(re.search(p, message) for p in patterns)
+            if wl:
+                wl_items = [w.strip() for w in wl.split(',') if w.strip()]
+                ok_wl = any(w.lower() in nick.lower() or w.lower() in message.lower() for w in wl_items)
+            return ok_kw and ok_rx and ok_wl
+        except Exception:
             return True
-        regexes = [r.strip() for r in self.regex_var.get().split(",") if r.strip()]
-        for reg in regexes:
-            try:
-                if re.search(reg, message, re.I):
-                    return True
-            except re.error:
-                continue
-        if not keywords and not regexes and not whitelist:
-            return True
-        return False
 
     # ---------------- Config ----------------
     def save_config(self):
-        cfg = {var: getattr(self, f"{var}_var").get() for var in ["server","port","ssl","nick","realname","channels","keywords","regex","whitelist"]}
+        cfg = {var: getattr(self, f"{var}_var").get() for var in ["server","port","ssl","nick","realname","channels","keywords","regex","whitelist","max_reconnect_attempts"]}
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
         messagebox.showinfo("Info", "Configuration sauvegardée.")
@@ -179,6 +192,7 @@ class IRCLoggerGUI:
             return
         # Réactiver la boucle de reconnexion si elle a été stoppée
         self.reconnect_flag = True
+        self.failed_reconnects = 0
         # Lancer la boucle IRC en tâche de fond
         threading.Thread(target=self.irc_loop, daemon=True).start()
 
@@ -186,6 +200,7 @@ class IRCLoggerGUI:
         # Demande d'arrêt de la boucle et fermeture de la connexion
         try:
             self.reconnect_flag = False
+            self.failed_reconnects = 0
             if self.client is not None:
                 # Tenter un QUIT gracieux, sinon une déconnexion directe
                 quit_fn = getattr(self.client, "quit", None)
@@ -207,6 +222,22 @@ class IRCLoggerGUI:
             # Ne pas bloquer sur erreur de déconnexion
             self.connected = False
             self.client = None
+
+    def send_privmsg(self, channel, text):
+        try:
+            if not self.connected or self.client is None:
+                self.log_irc_event("Impossible d’envoyer le message: IRC non connecté", event_type="INFO")
+                return False
+            channel = (channel or '').strip()
+            text = (text or '').strip()
+            if not channel or not text:
+                return False
+            self.client.privmsg(channel, text)
+            self.log_irc_event(f"Commande envoyée sur {channel}: {text}", event_type="INFO")
+            return True
+        except Exception as e:
+            self.log_irc_event(f"Erreur envoi commande '{text}' sur {channel}: {e}", event_type="INFO")
+            return False
 
     def irc_loop(self):
         while self.reconnect_flag:
@@ -230,14 +261,38 @@ class IRCLoggerGUI:
                 c.add_global_handler("join", self.on_join)
                 c.add_global_handler("part", self.on_part)
                 c.add_global_handler("quit", self.on_quit)
+                c.add_global_handler("kick", self.on_kick)
+                c.add_global_handler("disconnect", self.on_disconnect)
                 c.add_global_handler("all_events", self.on_event)
                 self.client = c
                 self.connected = True
+                self.failed_reconnects = 0  # reset après succès
+                # Boucle d'événements; retourne quand la connexion est fermée
                 self.reactor.process_forever()
-            except Exception as e:
-                self.log_irc_event(f"Erreur de connexion: {e}. Reconnexion dans {RECONNECT_DELAY}s...", event_type="INFO")
+                # Ici, la connexion est terminée (déconnexion serveur)
                 self.connected = False
+                self.log_irc_event(f"Connexion IRC perdue. Tentative de reconnexion dans {RECONNECT_DELAY}s...", event_type="INFO")
                 time.sleep(RECONNECT_DELAY)
+            except Exception as e:
+                # Échec d'établissement de connexion
+                self.failed_reconnects += 1
+                max_attempts = int(self.max_reconnect_attempts_var.get() or DEFAULT_MAX_RECONNECT_ATTEMPTS)
+                if self.failed_reconnects >= max_attempts:
+                    self.log_irc_event(
+                        f"Abandon après {max_attempts} tentatives infructueuses. Connexion stoppée.",
+                        event_type="INFO"
+                    )
+                    self.connected = False
+                    self.client = None
+                    self.reconnect_flag = False
+                    break
+                else:
+                    self.log_irc_event(
+                        f"Erreur de connexion: {e}. Reconnexion dans {RECONNECT_DELAY}s (tentative {self.failed_reconnects}/{max_attempts})...",
+                        event_type="INFO"
+                    )
+                    self.connected = False
+                    time.sleep(RECONNECT_DELAY)
 
     # ---------------- Handlers ----------------
     def on_connect(self, connection, event):
@@ -247,57 +302,76 @@ class IRCLoggerGUI:
 
     def on_pubmsg(self, connection, event):
         nick = event.source.nick
-        raw_message = event.arguments[0]
+        message = event.arguments[0]
         chan = event.target
-        self.log_irc_event(raw_message, nick=nick, event_type="MSG", channel=chan)
-        message_clean = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?','', raw_message)
-        message_clean = re.sub(r'[\x02\x1F\x16\x0F]','', message_clean)
-        no_filters = not self.keywords_var.get().strip() and not self.regex_var.get().strip() and not self.whitelist_var.get().strip()
-        types, _ = extract_release_types(raw_message)
-        if no_filters and types:
-            self.log_release(nick, raw_message, chan)
-            return
-        if self.apply_filters(nick, message_clean):
-            self.log_release(nick, raw_message, chan)
+        self.log_irc_event(message, nick=nick, event_type="MSG", channel=chan)
+        if self.apply_filters(nick, re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?','', message)):
+            self.log_release(nick, message, chan)
 
     def on_join(self, connection, event):
         self.log_irc_event("", nick=event.source.nick, event_type="JOIN", channel=event.target)
 
     def on_part(self, connection, event):
         self.log_irc_event("", nick=event.source.nick, event_type="PART", channel=event.target)
+        # Si nous avons quitté le chan (involontairement), tenter de rejoin
+        try:
+            my_nick = self.nick_var.get().strip()
+            if event.source and getattr(event.source, 'nick', None) == my_nick:
+                chan = event.target
+                self.log_irc_event(f"Nous avons quitté {chan}. Rejoin dans 5s...", event_type="INFO")
+                threading.Timer(5.0, lambda: connection.join(chan)).start()
+        except Exception:
+            pass
 
     def on_quit(self, connection, event):
-        self.log_irc_event("", nick=event.source.nick, event_type="QUIT")
+        self.log_irc_event("", nick=getattr(event.source, 'nick', ''), event_type="QUIT", channel=getattr(event, 'target', ''))
+
+    def on_kick(self, connection, event):
+        target = event.arguments[0] if event.arguments else ''
+        chan = event.target
+        my_nick = self.nick_var.get().strip()
+        if target == my_nick:
+            self.log_irc_event(f"KICK reçu sur {chan}. Rejoin dans 5s...", event_type="INFO")
+            threading.Timer(5.0, lambda: connection.join(chan)).start()
+        else:
+            self.log_irc_event("", nick=getattr(event.source, 'nick', ''), event_type="KICK", channel=chan)
+
+    def on_disconnect(self, connection, event):
+        # Déconnexion détectée; laisser irc_loop gérer la reconnexion
+        self.connected = False
+        self.log_irc_event("Déconnecté du serveur IRC", event_type="INFO")
 
     def on_event(self, connection, event):
-        self.log_irc_event(f"[DEBUG] {event.type} | Source: {event.source} | Target: {event.target} | Args: {event.arguments}", event_type="INFO")
+        # Logging générique pour debug
+        try:
+            ev_src = getattr(event.source, 'nick', str(event.source))
+        except Exception:
+            ev_src = str(event.source)
+        self.log_irc_event(f"[EVENT] {event.type} | Source: {ev_src} | Target: {event.target} | Args: {event.arguments}", event_type="EVENT")
 
-    # ---------------- Logs colorés ----------------
     def log_irc_event(self, text, nick=None, event_type="INFO", channel=None):
-        ts = time.strftime("%H:%M:%S", time.localtime())
-        if event_type == "MSG" and nick and channel:
-            line = f"[{ts}] <{nick}> {text}"
-            color = "blue"
-        elif event_type == "JOIN" and nick and channel:
-            line = f"[{ts}] -!- {nick} joined {channel}"
-            color = "green"
-        elif event_type == "PART" and nick and channel:
-            line = f"[{ts}] -!- {nick} left {channel}"
-            color = "orange"
-        elif event_type == "QUIT" and nick:
-            line = f"[{ts}] -!- {nick} quit"
-            color = "red"
+        ts = time.strftime("%H:%M:%S")
+        prefix = f"[{ts}] "
+        if event_type == "INFO":
+            line = prefix + text
+        elif event_type == "MSG":
+            line = prefix + (f"<{nick}@{channel}> " if nick and channel else "") + text
+        elif event_type in ("JOIN","PART","QUIT","KICK"):
+            line = prefix + f"[{event_type}] " + (f"{nick}@{channel}" if nick and channel else nick or channel or "")
+        elif event_type == "EVENT":
+            line = prefix + text
         else:
-            line = f"[{ts}] *** {text}"
-            color = "black"
-
+            line = prefix + text
         self.logs_text.config(state="normal")
-        self.logs_text.insert(tk.END, line + "\n", event_type)
-        self.logs_text.tag_config(event_type, foreground=color)
+        self.logs_text.insert(tk.END, line + "\n")
         self.logs_text.see(tk.END)
         self.logs_text.config(state="disabled")
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        # Fichier texte pour consultation via web_server
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
 
     # ---------------- Test message ----------------
     def test_message(self):

@@ -45,7 +45,8 @@ Exemple fourni:
   "channels": "#dupefr-pre",
   "keywords": "",
   "regex": "",
-  "whitelist": ""
+  "whitelist": "",
+  "max_reconnect_attempts": 5
 }
 ```
 
@@ -58,6 +59,7 @@ Exemple fourni:
 - `keywords` — Mots-clés utilisés pour filtrer/identifier des releases (facultatif).
 - `regex` — Expression régulière pour filtrer/typer des messages (facultatif).
 - `whitelist` — Liste blanche (nicks, channels, etc.) selon votre logique (facultatif).
+- `max_reconnect_attempts` — Nombre maximum de tentatives consécutives avant abandon (par défaut `5`).
 
 Vous pouvez créer/modifier ce fichier depuis la GUI du logger (`Sauvegarder la configuration`).
 
@@ -153,8 +155,21 @@ python web_server.py
 - `GET /api/irc/connect` — Demande de connexion (si logger injecté).
 - `GET /api/irc/disconnect` — Demande de déconnexion.
 - `GET /api/irc/logs?tail=200` — Dernières lignes de `irc_log.txt`.
+- `POST /api/irc/nfo` — Envoie une commande NFO et détecte automatiquement les URLs NFO dans les logs IRC.
 
-L’interface Web inclut filtrage, tri par clic sur en-têtes, pagination, affichage des logs IRC et bascule du thème (clair/sombre), avec un layout responsive.
+#### Fonctionnalité NFO
+
+L'interface Web inclut une **fonctionnalité NFO avancée** :
+
+- **Bouton NFO** : Disponible sur chaque ligne de release pour envoyer automatiquement la commande `!nfo <release_name>` sur IRC.
+- **Détection d'URL automatique** : Analyse les logs IRC en temps réel pour détecter les URLs NFO (ex: `https://dupefr.fr/nfo7/...`).
+- **Nettoyage des URLs** : Supprime automatiquement les codes de couleur IRC (`\x03xx`) et autres caractères parasites des URLs détectées.
+- **Ouverture automatique** : Ouvre directement l'URL NFO dans un nouvel onglet du navigateur.
+- **Notifications toast** : Affiche l'URL détectée avant ouverture et confirme l'action.
+
+Cette fonctionnalité permet de consulter rapidement les fichiers NFO des releases sans manipulation manuelle.
+
+L'interface Web inclut également filtrage, tri par clic sur en-têtes, pagination, affichage des logs IRC et bascule du thème (clair/sombre), avec un layout responsive.
 
 ## Base de données (SQLite)
 
@@ -175,6 +190,10 @@ L’interface Web inclut filtrage, tri par clic sur en-têtes, pagination, affic
   - Pare-feu Windows: autorisez Python sur le port choisi.
 - Export FTP/WinSCP/CrossFTP:
   - Complétez `ftp_sites.json` (host/user/pass) et vérifiez les chemins `base_paths` selon le `type` des releases.
+- Fonctionnalité NFO:
+  - **URLs NFO incorrectes** : Les codes de couleur IRC (`\x03xx`) sont automatiquement supprimés. Si le problème persiste, vérifiez les logs IRC.
+  - **Bouton NFO ne fonctionne pas** : Assurez-vous que le logger IRC est connecté et que le canal supporte les commandes `!nfo`.
+  - **Navigateur bloqué** : Si votre navigateur ou extension (ad blocker) bloque l'ouverture, désactivez temporairement les extensions ou testez en mode incognito.
 
 ## Bonnes pratiques / Sécurité
 
