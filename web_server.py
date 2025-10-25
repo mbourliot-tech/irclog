@@ -43,11 +43,12 @@ class RequestHandler(BaseHTTPRequestHandler):
     context: AppContext = None
 
     def log_message(self, format, *args):
-        # Rendre le serveur plus silencieux
-        return
+        # Temporairement activé pour debug
+        print(f"[HTTP] {format % args}")
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        print(f"[REQUEST] GET {parsed.path}")
         if parsed.path == "/":
             return self._serve_index()
         if parsed.path == "/api/releases":
@@ -68,6 +69,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._api_irc_logs(parsed)
         if parsed.path == "/api/irc/nfo":
             return self._api_irc_nfo(parsed)
+        if parsed.path == "/api/db/clean_messages":
+            return self._api_db_clean_messages()
+        if parsed.path == "/api/test":
+            return self._api_test()
 
         _html_response(self, "<h1>404 Not Found</h1>", status=404)
 
@@ -186,6 +191,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         <button id=\"btnTheme\" class=\"btn secondary\" title=\"Basculer le thème\">Mode sombre</button>
         <span id=\"ircStatus\" title=\"État IRC\">IRC: (inconnu)</span>
         <span id=\"count\"></span>
+        <button id=\"btnCleanMessages\" class=\"btn secondary\" title=\"Supprimer tags des messages\">Nettoyer messages</button>
       </div>
     </header>
 
@@ -253,6 +259,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     const btnCloseLogs = document.getElementById('btnCloseLogs');
     const toasts = document.getElementById('toasts');
     const btnTheme = document.getElementById('btnTheme');
+    const btnCleanMessages = document.getElementById('btnCleanMessages');
 
     let sort = [['ts', 'DESC']]; // col DB, direction
 
@@ -490,6 +497,24 @@ class RequestHandler(BaseHTTPRequestHandler):
         setTimeout(refreshIrcStatus, 500);
       }
     });
+    btnCleanMessages.addEventListener('click', async () => {
+      try {
+        btnCleanMessages.disabled = true;
+        const res = await fetch('/api/db/clean_messages');
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          showToast(`Nettoyage OK: ${data.updated || 0} mis à jour / ${data.processed || 0} traités`, 'success');
+          await load(1);
+        } else {
+          showToast(`Nettoyage erreur: ${data.error || 'HTTP ' + res.status}`, 'error');
+        }
+      } catch (e) {
+        console.error('Nettoyage erreur:', e);
+        showToast('Erreur réseau nettoyage', 'error');
+      } finally {
+        btnCleanMessages.disabled = false;
+      }
+    });
 
     async function loadLogs() {
       try {
@@ -709,6 +734,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _api_db_clean_messages(self):
+        try:
+            print("[API] /api/db/clean_messages: start", flush=True)
+            result = self.context.db.clean_messages_remove_tags()
+            print("[API] /api/db/clean_messages: result", result, flush=True)
+            _json_response(self, {"ok": True, **result})
+        except Exception as e:
+            print("[API] /api/db/clean_messages: error", e, flush=True)
+            _json_response(self, {"ok": False, "error": str(e)}, status=500)
+
+    def _api_test(self):
+        print("[API] /api/test: called")
+        return _json_response(self, {"status": "ok", "message": "Test endpoint working"})
+
     def _api_irc_status(self):
         ctx = self.context
         if not hasattr(ctx, "irc") or ctx.irc is None:
@@ -792,9 +831,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                     sent = True
             if not sent:
                 return _json_response(self, {"ok": False, "error": "Client IRC non disponible ou déconnecté"}, status=500)
-            # Attendre un lien https dans les logs
+
+            # Point de départ: longueur actuelle du log (ignorer lignes anciennes)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             log_path = os.path.join(base_dir, "irc_log.txt")
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    start_lines = f.readlines()
+                start_len = len(start_lines)
+            except Exception:
+                start_len = 0
+
             url_found = None
             url_regex = re.compile(r'https?://\S+', re.IGNORECASE)
             # Préparer le nick du bot pour filtrer les réponses en privmsg
@@ -810,46 +857,53 @@ class RequestHandler(BaseHTTPRequestHandler):
                 try:
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
-                    # Pass 1: lignes mentionnant Target: <nick> (privmsg au bot) ou @<channel>
-                    for line in lines[-500:]:
-                        if (my_nick and f"Target: {my_nick}" in line) or (f"@{channel}" in line):
-                            line_clean = re.sub(r'[\x00-\x1F\x7F]', '', line)
-                            # D’abord tenter le lien entre backticks
-                            tick_re = re.compile(r'`(https?://[^`\s]+)`', re.IGNORECASE)
-                            m_tick = tick_re.search(line_clean)
-                            candidates = []
-                            if m_tick:
-                                candidates.append(m_tick.group(1))
-                            # Sinon, fallback sur toutes les URLs de la ligne
-                            if not candidates:
-                                candidates = [m.group(0) for m in url_regex.finditer(line_clean)]
-                            if candidates:
-                                # Normaliser et sélectionner: préférer dupefr.fr/nfo7/, sinon dernier match
-                                normalized = []
-                                for u in candidates:
-                                    u = u.rstrip('.,)>]"\'`')
-                                    # Retirer codes de couleur IRC (\x03xx) et autres caractères de contrôle après .nfo
-                                    u = re.sub(r'(?<=\.nfo)\\x[0-9a-fA-F]{2,4}.*$', '', u)
-                                    u = re.sub(r'(?<=\.nfo)\d+$', '', u)
-                                    normalized.append(u)
-                                # Sélection NFO: tout lien https://… se terminant par .nfo (priorité dupefr.fr)
-                                nfo_any_re = re.compile(r'https?://[^`\s]+?\.nfo\b', re.IGNORECASE)
-                                nfo_any = [u for u in normalized if nfo_any_re.match(u)]
-                                if nfo_any:
-                                    preferred = [u for u in nfo_any if 'dupefr.fr' in u]
-                                    candidate = preferred[-1] if preferred else nfo_any[-1]
-                                    url_found = candidate
-                                    break
-                                # À défaut, garder dupefr.fr avec chemin /nfo*
-                                preferred = [u for u in normalized if 'dupefr.fr' in u and '/nfo' in u]
-                                if preferred:
-                                    candidate = preferred[-1]
-                                    url_found = candidate
-                                    break
-                                # Sinon, ne rien sélectionner sur cette ligne et continuer
-                    # Pass 2: si rien trouvé, chercher toute URL récente
+                    # Ne considérer que les nouvelles lignes depuis l’envoi de la commande
+                    new_lines = lines[start_len:]
+                    if not new_lines:
+                        time.sleep(0.3)
+                        continue
+
+                    # Pass 1: scanner des lignes les plus récentes vers les plus anciennes, filtrées par cible/canal
+                    for line in reversed(new_lines[-500:]):
+                        line_clean = re.sub(r'[\x00-\x1F\x7F]', '', line)
+                        if not ((my_nick and f"Target: {my_nick}" in line_clean) or (f"@{channel}" in line_clean)):
+                            continue
+                        # D’abord tenter le lien entre backticks
+                        tick_re = re.compile(r'`(https?://[^`\s]+)`', re.IGNORECASE)
+                        m_tick = tick_re.search(line_clean)
+                        candidates = []
+                        if m_tick:
+                            candidates.append(m_tick.group(1))
+                        # Sinon, fallback sur toutes les URLs de la ligne
+                        if not candidates:
+                            candidates = [m.group(0) for m in url_regex.finditer(line_clean)]
+                        if candidates:
+                            normalized = []
+                            for u in candidates:
+                                u = u.rstrip('.,)>]"\'`')
+                                # Retirer codes de couleur IRC (\x03xx) et autres caractères de contrôle après .nfo
+                                u = re.sub(r'(?<=\.nfo)\\x[0-9a-fA-F]{2,4}.*$', '', u)
+                                u = re.sub(r'(?<=\.nfo)\d+$', '', u)
+                                normalized.append(u)
+                            # Sélection NFO: tout lien https://… se terminant par .nfo (priorité dupefr.fr)
+                            nfo_any_re = re.compile(r'https?://[^`\s]+?\.nfo\b', re.IGNORECASE)
+                            nfo_any = [u for u in normalized if nfo_any_re.match(u)]
+                            if nfo_any:
+                                preferred = [u for u in nfo_any if 'dupefr.fr' in u]
+                                candidate = preferred[0] if preferred else nfo_any[0]
+                                url_found = candidate
+                                break
+                            # À défaut, garder dupefr.fr avec chemin /nfo*
+                            preferred = [u for u in normalized if 'dupefr.fr' in u and '/nfo' in u]
+                            if preferred:
+                                url_found = preferred[0]
+                                break
+                            # Fallback: prendre le premier lien trouvé
+                            url_found = normalized[0]
+                            break
+                    # Pass 2: si rien trouvé, chercher toute URL récente (sans filtre canal/cible)
                     if not url_found:
-                        for line in lines[-500:]:
+                        for line in reversed(new_lines[-500:]):
                             line_clean = re.sub(r'[\x00-\x1F\x7F]', '', line)
                             tick_re = re.compile(r'`(https?://[^`\s]+)`', re.IGNORECASE)
                             m_tick = tick_re.search(line_clean)
@@ -862,29 +916,27 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 normalized = []
                                 for u in candidates:
                                     u = u.rstrip('.,)>]"\'`')
-                                    # Retirer codes de couleur IRC (\x03xx) et autres caractères de contrôle après .nfo
                                     u = re.sub(r'(?<=\.nfo)\\x[0-9a-fA-F]{2,4}.*$', '', u)
                                     u = re.sub(r'(?<=\.nfo)\d+$', '', u)
                                     normalized.append(u)
-                                # Sélection NFO: tout lien https://… se terminant par .nfo (priorité dupefr.fr)
                                 nfo_any_re = re.compile(r'https?://[^`\s]+?\.nfo\b', re.IGNORECASE)
                                 nfo_any = [u for u in normalized if nfo_any_re.match(u)]
                                 if nfo_any:
                                     preferred = [u for u in nfo_any if 'dupefr.fr' in u]
-                                    candidate = preferred[-1] if preferred else nfo_any[-1]
+                                    candidate = preferred[0] if preferred else nfo_any[0]
                                     url_found = candidate
                                     break
                                 preferred = [u for u in normalized if 'dupefr.fr' in u and '/nfo' in u]
                                 if preferred:
-                                    candidate = preferred[-1]
-                                    url_found = candidate
+                                    url_found = preferred[0]
                                     break
-                                # Sinon, continuer sans rien sélectionner
+                                url_found = normalized[0]
+                                break
                     if url_found:
                         break
                 except Exception:
-                    pass
-                time.sleep(0.5)
+                   pass
+                time.sleep(0.3)
             return _json_response(self, {"ok": True, "sent": True, "url": url_found})
         except Exception as e:
             return _json_response(self, {"ok": False, "error": str(e)}, status=500)

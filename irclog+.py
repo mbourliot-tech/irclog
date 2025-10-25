@@ -19,11 +19,13 @@ DEFAULT_MAX_RECONNECT_ATTEMPTS = 5  # nb d'échecs consécutifs avant abandon
 
 def extract_release_types(message):
     try:
-        text_clean = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?','', message)
-        text_clean = re.sub(r'[\x02\x1F\x16\x0F]','', text_clean)
-        types = re.findall(r'\[(?:PRE|PRERELEASE|MOVIES|TV|MP3|GAMES|APPS|XXX|ANIME|EBOOKS|0DAY)\]', text_clean, flags=re.IGNORECASE)
-        types = [t.strip('[]').upper() for t in types]
-        return types, text_clean
+        text_clean = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?', '', message)
+        text_clean = re.sub(r'[\x02\x1F\x16\x0F]', '', text_clean)
+        raw_tags = re.findall(r'\[([^\]]+)\]', text_clean)
+        tags = [t.strip().upper() for t in raw_tags if t.strip()]
+        types = [t for t in tags if t not in ('PRE', 'PRERELEASE')]
+        text_no_tags = re.sub(r'^\s*(?:\[[^\]]+\]\s*)+', '', text_clean)
+        return types, text_no_tags
     except Exception:
         return [], message
 
@@ -122,7 +124,7 @@ class IRCLoggerGUI:
         types, text_clean = extract_release_types(message)
         if not types:
             return
-        type_to_log = types[-1]
+        type_to_log = types[0] if types else ""
         ts = int(time.time())
         ts_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 

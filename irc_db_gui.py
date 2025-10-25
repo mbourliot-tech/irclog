@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import re
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -241,6 +242,41 @@ class ReleasesDB:
         qmarks = ",".join(["?"] * len(ids))
         self.conn.execute(f"DELETE FROM releases WHERE id IN ({qmarks})", ids)
         self.conn.commit()
+
+    def _extract_type_and_clean_message(self, message: str):
+        text = re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?', '', message or '')
+        text = re.sub(r'[\x02\x1F\x16\x0F]', '', text)
+        raw_tags = re.findall(r'\[([^\]]+)\]', text)
+        tags = [t.strip().upper() for t in raw_tags if t.strip()]
+        type_val = ''
+        for t in tags:
+            if t not in ('PRE', 'PRERELEASE'):
+                type_val = t
+                break
+        text_no_tags = re.sub(r'^\s*(?:\[[^\]]+\]\s*)+', '', text)
+        return type_val, text_no_tags
+
+    def clean_messages_remove_tags(self):
+        cur = self.conn.execute("SELECT id, message, type FROM releases")
+        rows = cur.fetchall()
+        processed = 0
+        updated = 0
+        for row in rows:
+            processed += 1
+            rid = row["id"]
+            msg = row["message"] or ''
+            type_old = row["type"] or ''
+            type_new, msg_clean = self._extract_type_and_clean_message(msg)
+            final_type = type_new if type_new else type_old
+            if msg_clean != msg or final_type != type_old:
+                self.conn.execute(
+                    "UPDATE releases SET message = ?, type = ? WHERE id = ?",
+                    (msg_clean, final_type, rid)
+                )
+                updated += 1
+        if updated:
+            self.conn.commit()
+        return {"processed": processed, "updated": updated}
 
 
 class AddEditDialog(tk.Toplevel):
