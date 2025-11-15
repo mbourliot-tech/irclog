@@ -9,6 +9,7 @@ from web_server import start_web_server_in_thread
 
 def load_irclog_plus_class():
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Utilise la version patchée, thread-safe (évite segfault sous Linux)
     plus_path = os.path.join(base_dir, "irclog+.py")
     spec = importlib.util.spec_from_file_location("irclog_plus", plus_path)
     mod = importlib.util.module_from_spec(spec)

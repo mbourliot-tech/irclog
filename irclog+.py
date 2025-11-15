@@ -392,6 +392,53 @@ class IRCLoggerGUI:
             self.log_release(nick, sample_msg, channel)
 
 
+class _IRCLoggerGUIThreadSafe(IRCLoggerGUI):
+    def _append_log_widget(self, line):
+        try:
+            self.logs_text.config(state="normal")
+            self.logs_text.insert(tk.END, line + "\n")
+            self.logs_text.see(tk.END)
+            self.logs_text.config(state="disabled")
+        except Exception:
+            pass
+
+    def log_irc_event(self, text, nick=None, event_type="INFO", channel=None):
+        ts = time.strftime("%H:%M:%S")
+        prefix = f"[{ts}] "
+        if event_type == "INFO":
+            line = prefix + text
+        elif event_type == "MSG":
+            line = prefix + (f"<{nick}@{channel}> " if nick and channel else "") + text
+        elif event_type in ("JOIN","PART","QUIT","KICK"):
+            line = prefix + f"[{event_type}] " + (f"{nick}@{channel}" if nick and channel else nick or channel or "")
+        elif event_type == "EVENT":
+            line = prefix + text
+        else:
+            line = prefix + text
+        try:
+            self.root.after(0, lambda: self._append_log_widget(line))
+        except Exception:
+            pass
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    def on_pubmsg(self, connection, event):
+        nick = event.source.nick
+        message = event.arguments[0]
+        chan = event.target
+        self.log_irc_event(message, nick=nick, event_type="MSG", channel=chan)
+        if self.apply_filters(nick, re.sub(r'\x03(\d{1,2}(,\d{1,2})?)?','', message)):
+            try:
+                self.root.after(0, lambda: self.log_release(nick, message, chan))
+            except Exception:
+                pass
+
+# Remplace la classe exportée par la version thread-safe
+IRCLoggerGUI = _IRCLoggerGUIThreadSafe
+
 if __name__ == "__main__":
     root = tk.Tk()
     app = IRCLoggerGUI(root)
