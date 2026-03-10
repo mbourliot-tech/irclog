@@ -67,6 +67,7 @@ class IRCLoggerGUI:
 
         self.load_config()
         self.reconnect_flag = True
+        self.stop_event = threading.Event()
 
     # ---------------- UI ----------------
     def create_widgets(self):
@@ -194,6 +195,7 @@ class IRCLoggerGUI:
             return
         # Réactiver la boucle de reconnexion si elle a été stoppée
         self.reconnect_flag = True
+        self.stop_event.clear()
         self.failed_reconnects = 0
         # Lancer la boucle IRC en tâche de fond
         threading.Thread(target=self.irc_loop, daemon=True).start()
@@ -202,6 +204,7 @@ class IRCLoggerGUI:
         # Demande d'arrêt de la boucle et fermeture de la connexion
         try:
             self.reconnect_flag = False
+            self.stop_event.set()
             self.failed_reconnects = 0
             if self.client is not None:
                 # Tenter un QUIT gracieux, sinon une déconnexion directe
@@ -273,8 +276,9 @@ class IRCLoggerGUI:
                 self.reactor.process_forever()
                 # Ici, la connexion est terminée (déconnexion serveur)
                 self.connected = False
-                self.log_irc_event(f"Connexion IRC perdue. Tentative de reconnexion dans {RECONNECT_DELAY}s...", event_type="INFO")
-                time.sleep(RECONNECT_DELAY)
+                if self.reconnect_flag:
+                    self.log_irc_event(f"Connexion IRC perdue. Tentative de reconnexion dans {RECONNECT_DELAY}s...", event_type="INFO")
+                    self.stop_event.wait(RECONNECT_DELAY)
             except Exception as e:
                 # Échec d'établissement de connexion
                 self.failed_reconnects += 1
@@ -289,12 +293,13 @@ class IRCLoggerGUI:
                     self.reconnect_flag = False
                     break
                 else:
-                    self.log_irc_event(
-                        f"Erreur de connexion: {e}. Reconnexion dans {RECONNECT_DELAY}s (tentative {self.failed_reconnects}/{max_attempts})...",
-                        event_type="INFO"
-                    )
-                    self.connected = False
-                    time.sleep(RECONNECT_DELAY)
+                    if self.reconnect_flag:
+                        self.log_irc_event(
+                            f"Erreur de connexion: {e}. Reconnexion dans {RECONNECT_DELAY}s (tentative {self.failed_reconnects}/{max_attempts})...",
+                            event_type="INFO"
+                        )
+                        self.connected = False
+                        self.stop_event.wait(RECONNECT_DELAY)
 
     # ---------------- Handlers ----------------
     def on_connect(self, connection, event):
