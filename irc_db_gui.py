@@ -25,6 +25,8 @@ class ReleasesDB:
         # check_same_thread=False pour permettre la mise à jour depuis callbacks
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # Enable Write-Ahead Logging for better concurrency
+        self.conn.execute("PRAGMA journal_mode=WAL;")
         self.ensure_schema()
 
     def ensure_schema(self):

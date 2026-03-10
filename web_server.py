@@ -5,7 +5,7 @@ import os
 import threading
 import re
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 import urllib.request
 import urllib.error
@@ -835,12 +835,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             # Point de départ: longueur actuelle du log (ignorer lignes anciennes)
             base_dir = os.path.dirname(os.path.abspath(__file__))
             log_path = os.path.join(base_dir, "irc_log.txt")
+
+            # Utilisation de f.seek pour éviter de lire tout le fichier à chaque fois
+            last_pos = 0
             try:
-                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                    start_lines = f.readlines()
-                start_len = len(start_lines)
+                if os.path.exists(log_path):
+                    last_pos = os.path.getsize(log_path)
             except Exception:
-                start_len = 0
+                pass
 
             url_found = None
             url_regex = re.compile(r'https?://\S+', re.IGNORECASE)
@@ -853,12 +855,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 my_nick = None
             deadline = time.time() + 10.0
+            new_lines = []
+            partial_line = ""
             while time.time() < deadline:
                 try:
                     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                        lines = f.readlines()
-                    # Ne considérer que les nouvelles lignes depuis l’envoi de la commande
-                    new_lines = lines[start_len:]
+                        f.seek(last_pos)
+                        new_data = f.read()
+                        last_pos = f.tell()
+
+                    if new_data:
+                        # Gérer les lignes incomplètes
+                        text_to_process = partial_line + new_data
+                        if text_to_process.endswith('\n'):
+                            lines_to_add = text_to_process.splitlines()
+                            partial_line = ""
+                        else:
+                            lines_to_add = text_to_process.splitlines()
+                            if lines_to_add:
+                                partial_line = lines_to_add.pop()
+                            else:
+                                partial_line = ""
+
+                        new_lines.extend(lines_to_add)
+
                     if not new_lines:
                         time.sleep(0.3)
                         continue
@@ -951,7 +971,7 @@ def start_web_server(host: str = "0.0.0.0", port: int = 8000, irc_logger=None):
     # Injecter le contexte partagé
     ContextualHandler.context = context
 
-    httpd = HTTPServer((host, port), ContextualHandler)
+    httpd = ThreadingHTTPServer((host, port), ContextualHandler)
     print(f"Web UI prêt: http://{host if host != '0.0.0.0' else 'localhost'}:{port}/")
     try:
         httpd.serve_forever()
